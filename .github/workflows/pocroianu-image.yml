@@ -1,0 +1,85 @@
+# Fork image build for the homelab. Upstream's build, release, CLI publish and
+# infrastructure-notify workflows target the learnhouse organisation's registry
+# and secrets and are disabled in this fork. This builds the community edition
+# (LEARNHOUSE_PUBLIC=true strips enterprise code) for linux/amd64, pushes it to
+# ghcr.io/pocroianu/learnhouse and attests its build provenance. The homelab
+# installs an image by digest only after verifying that attestation.
+name: Pocroianu image
+
+on:
+  push:
+    branches: [dev]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'apps/cli/**'
+      - 'apps/e2e/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/pocroianu/learnhouse
+
+jobs:
+  image:
+    name: Build image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on dev)
+        id: build
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            LEARNHOUSE_PUBLIC=true
+            BUILD_ID=${{ github.sha }}
+          cache-from: type=gha,scope=pocroianu-amd64
+          cache-to: type=gha,mode=max,scope=pocroianu-amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:dev
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
